@@ -1,6 +1,6 @@
 # ConsorcioPro
 
-Plataforma digital-first de consórcios. Concorrente direto de Itaú, Porto Seguro e Embracon.
+Plataforma digital-first de consórcios. Concorrente direto da Porto Seguro e Embracon.
 
 ---
 
