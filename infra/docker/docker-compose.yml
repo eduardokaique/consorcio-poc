@@ -1,0 +1,185 @@
+version: '3.9'
+
+services:
+  # ─────────────────────────────────────────
+  # BANCO DE DADOS
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: consorcio_postgres
+    environment:
+      POSTGRES_USER: consorcio
+      POSTGRES_PASSWORD: consorcio_dev_2026
+      POSTGRES_DB: consorcio_db
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-schemas.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U consorcio -d consorcio_db']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: consorcio_redis
+    ports:
+      - '6379:6379'
+    command: redis-server --requirepass consorcio_redis_dev
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--no-auth-warning', '-a', 'consorcio_redis_dev', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─────────────────────────────────────────
+  # KAFKA
+  # ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.0
+    container_name: consorcio_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: consorcio_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - '9092:9092'
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: consorcio_kafka_ui
+    depends_on:
+      - kafka
+    ports:
+      - '8080:8080'
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  # ─────────────────────────────────────────
+  # SERVIÇOS BACKEND
+  # ─────────────────────────────────────────
+  auth-service:
+    build:
+      context: ../../src/backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE: auth-service
+    container_name: consorcio_auth
+    environment:
+      DATABASE_URL: postgresql://consorcio:consorcio_dev_2026@postgres:5432/consorcio_db?schema=auth
+      REDIS_URL: redis://:consorcio_redis_dev@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-super_secret_dev_only_change_in_prod}
+      JWT_EXPIRES_IN: 15m
+      REFRESH_EXPIRES_IN: 7d
+      NODE_ENV: development
+    ports:
+      - '3001:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  grupos-service:
+    build:
+      context: ../../src/backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE: grupos-service
+    container_name: consorcio_grupos
+    environment:
+      DATABASE_URL: postgresql://consorcio:consorcio_dev_2026@postgres:5432/consorcio_db?schema=grupos
+      REDIS_URL: redis://:consorcio_redis_dev@redis:6379
+      KAFKA_BROKERS: kafka:9092
+      NODE_ENV: development
+    ports:
+      - '3002:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  financeiro-service:
+    build:
+      context: ../../src/backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE: financeiro-service
+    container_name: consorcio_financeiro
+    environment:
+      DATABASE_URL: postgresql://consorcio:consorcio_dev_2026@postgres:5432/consorcio_db?schema=financeiro
+      REDIS_URL: redis://:consorcio_redis_dev@redis:6379
+      KAFKA_BROKERS: kafka:9092
+      CELCOIN_API_URL: ${CELCOIN_API_URL}
+      CELCOIN_CLIENT_ID: ${CELCOIN_CLIENT_ID}
+      CELCOIN_CLIENT_SECRET: ${CELCOIN_CLIENT_SECRET}
+      NODE_ENV: development
+    ports:
+      - '3003:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  assembleia-service:
+    build:
+      context: ../../src/backend
+      dockerfile: Dockerfile
+      args:
+        SERVICE: assembleia-service
+    container_name: consorcio_assembleia
+    environment:
+      DATABASE_URL: postgresql://consorcio:consorcio_dev_2026@postgres:5432/consorcio_db?schema=assembleias
+      REDIS_URL: redis://:consorcio_redis_dev@redis:6379
+      KAFKA_BROKERS: kafka:9092
+      NODE_ENV: development
+    ports:
+      - '3004:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  # ─────────────────────────────────────────
+  # FRONTEND
+  # ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ../../src/frontend
+      dockerfile: Dockerfile
+    container_name: consorcio_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+      NODE_ENV: development
+    ports:
+      - '3000:3000'
+    depends_on:
+      - auth-service
+      - grupos-service
+
+volumes:
+  postgres_data:
+  redis_data:
+  zookeeper_data:
+  kafka_data:

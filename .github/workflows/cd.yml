@@ -1,0 +1,85 @@
+name: CD — Deploy Produção
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  deploy-production:
+    name: Deploy Produção (Blue/Green)
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.consorciopro.com.br
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build e push imagem de produção
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.ref_name }}
+        run: |
+          docker build \
+            --build-arg NODE_ENV=production \
+            -t $ECR_REGISTRY/consorciopro-backend:$IMAGE_TAG \
+            -t $ECR_REGISTRY/consorciopro-backend:latest \
+            src/backend
+          docker push $ECR_REGISTRY/consorciopro-backend:$IMAGE_TAG
+          docker push $ECR_REGISTRY/consorciopro-backend:latest
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_PROD }}
+        run: |
+          npm ci --prefix src/backend
+          cd src/backend && npx prisma migrate deploy
+
+      - name: Deploy Blue/Green via Helm
+        env:
+          IMAGE_TAG: ${{ github.ref_name }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          helm upgrade --install consorciopro ./infra/k8s/chart \
+            --namespace production \
+            --set image.repository=$ECR_REGISTRY/consorciopro-backend \
+            --set image.tag=$IMAGE_TAG \
+            --set strategy=blueGreen \
+            --atomic \
+            --timeout 10m
+
+      - name: Smoke tests pós-deploy
+        run: |
+          curl -sf https://api.consorciopro.com.br/api/v1/health || exit 1
+          curl -sf https://api.consorciopro.com.br/api/v1/grupos?status=ativo | jq '.length >= 0' || exit 1
+          echo "Smoke tests passaram ✓"
+
+      - name: Rollback automático se smoke falhar
+        if: failure()
+        run: |
+          echo "Smoke tests falharam — executando rollback"
+          helm rollback consorciopro --namespace production
+          exit 1
+
+      - name: Notificar Slack — deploy concluído
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "✅ Deploy *${{ github.ref_name }}* em produção concluído com sucesso!",
+              "channel": "#deploys"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
